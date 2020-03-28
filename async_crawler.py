@@ -26,7 +26,7 @@ NEWS_FOLDER = "news"
 WAIT = 30
 MAX_NEWS = 30
 BASE_URL = "https://news.ycombinator.com/"
-MAX_CONNECTIONS = 3
+MAX_CONNECTIONS = 1
 CYCLES = None
 HTTP_TIMEOUT = 60
 FILE_EXT = ".html"
@@ -220,7 +220,7 @@ async def download_one_news(session, url, title, comment_url, folder, connection
         remove_tmp(news_folder_tmp)
         raise
 
-    return url
+    return url, title
 
 
 async def download_news_coro(folder, url, n_news, wait, main_url_connections):
@@ -247,10 +247,10 @@ async def download_news_coro(folder, url, n_news, wait, main_url_connections):
             to_do = [download_one_news(session, params.url, params.title, params.comment_url, folder, connections_sem) for params in news_params]
             for future in asyncio.as_completed(to_do):
                 try:
-                    proccesed_url = await future
+                    proccesed_url, proccesed_title = await future
                     proccesed += 1
                     proccesed_urls.add(proccesed_url)
-                    logging.info(f"Download complete for news by url {proccesed_url}")
+                    logging.info(f"Download complete for news '{proccesed_title}' by url {proccesed_url}")
                 except DownloadError as e:
                     errors += 1
                     logging.exception(f"Error process news by url {e.url} - {e.msg}: ")
