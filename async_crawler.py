@@ -9,6 +9,7 @@ import os
 from html import unescape
 from http import HTTPStatus
 import shutil
+from time import  sleep
 
 news_urls_str = "<td class=\"title\"><a href=\"(.*?)\".*?class=\"storylink\".*?>(.*?)<\/a>.*?<span class=\"age\"><a href=\"(item\?id=.*?)\">"
 news_urls_pattern = re.compile(news_urls_str, re.DOTALL)
@@ -25,9 +26,9 @@ NEWS_FOLDER = "news"
 WAIT = 30
 MAX_NEWS = 30
 BASE_URL = "https://news.ycombinator.com/"
-MAX_CONNECTIONS = 20
+MAX_CONNECTIONS = 3
 CYCLES = None
-HTTP_TIMEOUT = 30
+HTTP_TIMEOUT = 60
 FILE_EXT = ".html"
 MAX_FILE_NAME = 50
 FORBIDDEN_CHARS = ("/", )
@@ -60,8 +61,7 @@ def remove_tmp(folder):
         return
 
     for file in os.listdir(folder):
-        os.remove(file)
-
+        os.remove(os.path.join(folder, file))
     os.rmdir(folder)
 
 
@@ -79,11 +79,18 @@ def make_fn_from_url(url):
         for c in FORBIDDEN_CHARS:
             fn = fn.replace(c, "_")
 
-        if fn.lower().endswith(FILE_EXT.lower()):
-            fn = fn[:-len(FILE_EXT)]
+        if "." in fn:
+            ext = "." + fn.split(".")[-1]
+        else:
+            ext = FILE_EXT
 
-        if len(fn) > MAX_FILE_NAME+len(FILE_EXT):
-            fn = fn[:MAX_FILE_NAME-len(FILE_EXT)] + FILE_EXT
+        if fn.lower().endswith(ext.lower()):
+            fn = fn[:-len(ext)]
+
+        if len(fn) > MAX_FILE_NAME+len(ext):
+            fn = fn[:MAX_FILE_NAME-len(ext)] + ext
+        else:
+            fn = fn + ext
 
         return fn
 
@@ -92,18 +99,19 @@ async def download_to_file(session, url, folder):
     fn = make_fn_from_url(url)
     fn = os.path.join(folder, fn)
     try:
-        logging.debug(f"Start download from {url}")
+        logging.debug(f"Start download from {url} to {fn}")
         with async_timeout.timeout(HTTP_TIMEOUT):
             async with session.get(url) as response:
                 if response.status != HTTPStatus.OK:
-                    raise DownloadError(url, f"Error download from {url}, status {response.status}")
+                    raise DownloadError(url, f"Response status {response.status}")
                 with open(fn, "wb") as f:
                     while True:
                         chunk = await response.content.read()
                         if not chunk:
                             break
                         f.write(chunk)
-        logging.debug(f"End download from {url}")
+        logging.debug(f"End download from {url}to {fn}")
+
     except Exception as e:
         raise DownloadError(url, f"Error download from {url} to {fn}") from e
     return url
@@ -148,7 +156,6 @@ async def get_news_params(session, url, n_news):
 
     return news_params
 
-
 def get_unprocessed_news(proccesed_urls, news_params):
     unprocessed_news = []
     for params in news_params:
@@ -161,29 +168,29 @@ def get_unprocessed_news(proccesed_urls, news_params):
 async def download_one_news(session, url, title, comment_url, folder, connections_sem):
     def main_callback(future):
         try:
-            url = future.result()
-            logging.debug(f"Download main news '{title}' by url {url} complete")
+            processed_url = future.result()
+            logging.debug(f"Download main news '{title}' by url {processed_url} complete")
         except DownloadError as e:
-            logging.error(f"Error download main news '{title}' by url {e.url}")
+            logging.exception(f"Error download main news '{title}' by url {e.url}")
             raise
         except Exception as e:
-            logging.error(f"Unexpected error download main news '{title}'")
+            logging.exception(f"Unexpected error download main news '{title}'")
             raise
 
     def additional_callback(future):
         try:
-            url = future.result()
-            logging.debug(f"Download additional news for '{title}' by url {url} complete")
+            processed_url = future.result()
+            logging.debug(f"Download additional news for '{title}' by url {processed_url} complete")
         except DownloadError as e:
-            logging.error(f"Error download additional news for '{title}' by url {e.url}")
+            logging.exception(f"Error download additional news for '{title}' by url {e.url}")
         except Exception as e:
-            logging.error(f"Unexpected error download additional news for '{title}'")
+            logging.exception(f"Unexpected error download additional news for '{title}'")
 
     news_folder = title
     for c in FORBIDDEN_CHARS:
         news_folder = news_folder.replace(c, "_")
+    news_folder_tmp = os.path.join(folder, TMP + news_folder)
     news_folder = os.path.join(folder, news_folder)
-    news_folder_tmp = news_folder + TMP
     if not os.path.exists(news_folder_tmp):
         os.mkdir(news_folder_tmp)
 
@@ -200,14 +207,18 @@ async def download_one_news(session, url, title, comment_url, folder, connection
             additional_future.add_done_callback(additional_callback)
             additional_futures.append(additional_future)
 
-        try:
-            await asyncio.gather(*additional_futures)
-        except Exception as e:
-            logging.info(f"Not all additional news for '{title}' downloaded")
+        additional_gather = asyncio.gather(*additional_futures, return_exceptions=True)
+        results = await additional_gather
+
+        for res in results:
+            if isinstance(res, Exception):
+                logging.info(f"Not all additional news for '{title}' downloaded")
+                break
 
         move_from_tmp(news_folder_tmp, news_folder)
     except Exception:
         remove_tmp(news_folder_tmp)
+        raise
 
     return url
 
