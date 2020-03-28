@@ -7,6 +7,7 @@ from collections import namedtuple
 import re
 import os
 from html import unescape
+from time import time
 from http import HTTPStatus
 import shutil
 from time import  sleep
@@ -28,12 +29,11 @@ MAX_NEWS = 30
 BASE_URL = "https://news.ycombinator.com/"
 MAX_CONNECTIONS = 1
 CYCLES = None
-HTTP_TIMEOUT = 60
+HTTP_TIMEOUT = 30
 FILE_EXT = ".html"
 MAX_FILE_NAME = 50
 FORBIDDEN_CHARS = ("/", )
 SCHEME_TEMPLATE = "://"
-
 TMP = ".tmp"
 
 
@@ -50,7 +50,6 @@ def move_from_tmp(from_folder, to_folder):
     for file in os.listdir(from_folder):
         if os.path.exists(os.path.join(to_folder, file)):
             os.remove(os.path.join(to_folder, file))
-
         shutil.move(os.path.join(from_folder, file), to_folder)
 
     os.rmdir(from_folder)
@@ -66,33 +65,33 @@ def remove_tmp(folder):
 
 
 def make_fn_from_url(url):
-        fn = url
-        if SCHEME_TEMPLATE in fn:
-            fn = fn.split(SCHEME_TEMPLATE)[-1]
+    fn = url
+    if SCHEME_TEMPLATE in fn:
+        fn = fn.split(SCHEME_TEMPLATE)[-1]
 
-        if fn.endswith("/"):
-            fn = fn[:-1]
+    if fn.endswith("/"):
+        fn = fn[:-1]
 
-        if "/" in fn:
-            fn = fn.split("/")[-1]
+    if "/" in fn:
+        fn = fn.split("/")[-1]
 
-        for c in FORBIDDEN_CHARS:
-            fn = fn.replace(c, "_")
+    for c in FORBIDDEN_CHARS:
+        fn = fn.replace(c, "_")
 
-        if "." in fn:
-            ext = "." + fn.split(".")[-1]
-        else:
-            ext = FILE_EXT
+    if "." in fn:
+        ext = "." + fn.split(".")[-1]
+    else:
+        ext = FILE_EXT
 
-        if fn.lower().endswith(ext.lower()):
-            fn = fn[:-len(ext)]
+    if fn.lower().endswith(ext.lower()):
+        fn = fn[:-len(ext)]
 
-        if len(fn) > MAX_FILE_NAME+len(ext):
-            fn = fn[:MAX_FILE_NAME-len(ext)] + ext
-        else:
-            fn = fn + ext
+    if len(fn) > MAX_FILE_NAME+len(ext):
+        fn = fn[:MAX_FILE_NAME-len(ext)] + ext
+    else:
+        fn = fn + ext
 
-        return fn
+    return fn
 
 
 async def download_to_file(session, url, folder):
@@ -114,6 +113,7 @@ async def download_to_file(session, url, folder):
 
     except Exception as e:
         raise DownloadError(url, f"Error download from {url} to {fn}") from e
+
     return url
 
 
@@ -208,9 +208,9 @@ async def download_one_news(session, url, title, comment_url, folder, connection
             additional_futures.append(additional_future)
 
         additional_gather = asyncio.gather(*additional_futures, return_exceptions=True)
-        results = await additional_gather
+        additional_results = await additional_gather
 
-        for res in results:
+        for res in additional_results:
             if isinstance(res, Exception):
                 logging.info(f"Not all additional news for '{title}' downloaded")
                 break
@@ -229,6 +229,7 @@ async def download_news_coro(folder, url, n_news, wait, main_url_connections):
 
     i = 0
     while True:
+        t = time()
         i += 1
         if CYCLES and i > CYCLES:
             break
@@ -258,7 +259,7 @@ async def download_news_coro(folder, url, n_news, wait, main_url_connections):
                     errors += 1
                     logging.exception("Unexpected error: ")
 
-        logging.info(f"Downloading complete, {proccesed} news proccesd, {errors} errors")
+        logging.info(f"Downloading complete for {time()-t:.2f} seconds, {proccesed} news proccesd, {errors} errors")
         logging.info(f"Wait {wait} seconds")
         await asyncio.sleep(wait)
 
