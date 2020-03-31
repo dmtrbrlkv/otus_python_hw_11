@@ -10,7 +10,7 @@ from html import unescape
 from time import time
 from http import HTTPStatus
 import shutil
-from time import  sleep
+import functools
 
 news_urls_str = "<td class=\"title\"><a href=\"(.*?)\".*?class=\"storylink\".*?>(.*?)<\/a>.*?<span class=\"age\"><a href=\"(item\?id=.*?)\">"
 news_urls_pattern = re.compile(news_urls_str, re.DOTALL)
@@ -94,21 +94,26 @@ def make_fn_from_url(url):
     return fn
 
 
+async def get_response(session, url, err_msg):
+        response = await session.get(url)
+        if response.status != HTTPStatus.OK:
+            raise DownloadError(url, err_msg + f", response status {response.status}")
+        return response
+
+
 async def download_to_file(session, url, folder):
     fn = make_fn_from_url(url)
     fn = os.path.join(folder, fn)
     try:
         logging.debug(f"Start download from {url} to {fn}")
-        with async_timeout.timeout(HTTP_TIMEOUT):
-            async with session.get(url) as response:
-                if response.status != HTTPStatus.OK:
-                    raise DownloadError(url, f"Response status {response.status}")
-                with open(fn, "wb") as f:
-                    while True:
-                        chunk = await response.content.read()
-                        if not chunk:
-                            break
-                        f.write(chunk)
+        response = await get_response(session, url, "Error download to file")
+        async with response:
+            with open(fn, "wb") as f:
+                while True:
+                    chunk = await response.content.read()
+                    if not chunk:
+                        break
+                    f.write(chunk)
         logging.debug(f"End download from {url}to {fn}")
 
     except Exception as e:
@@ -120,11 +125,9 @@ async def download_to_file(session, url, folder):
 async def get_urls_in_comment(session, base_url, comment_url, conections_sem):
 
     async with conections_sem:
-        with async_timeout.timeout(HTTP_TIMEOUT):
-            async with session.get(comment_url) as response:
-                if response.status != HTTPStatus.OK:
-                    raise DownloadError(comment_url, f"Error load comment page {comment_url}, status {response.status}")
-                content = await response.text()
+        response = await get_response(session, comment_url, f"Error load comment page {comment_url}")
+        async with response:
+            content = await response.text()
 
     urls = set()
     for comment in re.findall(comment_pattern, content):
@@ -139,11 +142,9 @@ async def get_urls_in_comment(session, base_url, comment_url, conections_sem):
 
 
 async def get_news_params(session, url, n_news):
-    with async_timeout.timeout(HTTP_TIMEOUT):
-        async with session.get(url) as response:
-            if response.status != HTTPStatus.OK:
-                raise DownloadError(url, f"Error load main page {url}, status {response.status}")
-            content = await response.text()
+    response = await get_response(session, url, f"Error load main page {url}")
+    async with response:
+        content = await response.text()
 
     news_params = []
     for i, info in enumerate(re.findall(news_urls_pattern, content)):
@@ -156,6 +157,7 @@ async def get_news_params(session, url, n_news):
 
     return news_params
 
+
 def get_unprocessed_news(proccesed_urls, news_params):
     unprocessed_news = []
     for params in news_params:
@@ -166,25 +168,25 @@ def get_unprocessed_news(proccesed_urls, news_params):
 
 
 async def download_one_news(session, url, title, comment_url, folder, connections_sem):
-    def main_callback(future):
+    def callback(future, is_main=True):
         try:
             processed_url = future.result()
-            logging.debug(f"Download main news '{title}' by url {processed_url} complete")
+            if is_main:
+                logging.debug(f"Download main news '{title}' by url {processed_url} complete")
+            else:
+                logging.debug(f"Download additional news for '{title}' by url {processed_url} complete")
         except DownloadError as e:
-            logging.exception(f"Error download main news '{title}' by url {e.url}")
+            if is_main:
+                logging.exception(f"Error download main news '{title}' by url {e.url}")
+            else:
+                logging.exception(f"Error download additional news for '{title}' by url {e.url}")
             raise
         except Exception as e:
-            logging.exception(f"Unexpected error download main news '{title}'")
+            if is_main:
+                logging.exception(f"Unexpected error download main news '{title}'")
+            else:
+                logging.exception(f"Unexpected error download additional news for '{title}'")
             raise
-
-    def additional_callback(future):
-        try:
-            processed_url = future.result()
-            logging.debug(f"Download additional news for '{title}' by url {processed_url} complete")
-        except DownloadError as e:
-            logging.exception(f"Error download additional news for '{title}' by url {e.url}")
-        except Exception as e:
-            logging.exception(f"Unexpected error download additional news for '{title}'")
 
     news_folder = title
     for c in FORBIDDEN_CHARS:
@@ -195,19 +197,19 @@ async def download_one_news(session, url, title, comment_url, folder, connection
         os.mkdir(news_folder_tmp)
 
     try:
-        main_future = asyncio.ensure_future(download_to_file(session, url, news_folder_tmp))
-        main_future.add_done_callback(main_callback)
-        await main_future
+        main_task = asyncio.create_task(download_to_file(session, url, news_folder_tmp))
+        main_task.add_done_callback(callback)
+        await main_task
 
         urls_in_comment = await get_urls_in_comment(session, url, comment_url, connections_sem)
 
-        additional_futures = []
+        additional_tasks = []
         for url_in_comment in urls_in_comment:
-            additional_future = asyncio.ensure_future(download_to_file(session, url_in_comment, news_folder_tmp))
-            additional_future.add_done_callback(additional_callback)
-            additional_futures.append(additional_future)
+            additional_task = asyncio.create_task(download_to_file(session, url_in_comment, news_folder_tmp))
+            additional_task.add_done_callback(functools.partial(callback, is_main=False))
+            additional_tasks.append(additional_task)
 
-        additional_gather = asyncio.gather(*additional_futures, return_exceptions=True)
+        additional_gather = asyncio.gather(*additional_tasks, return_exceptions=True)
         additional_results = await additional_gather
 
         for res in additional_results:
@@ -239,16 +241,17 @@ async def download_news_coro(folder, url, n_news, wait, main_url_connections):
         proccesed = 0
         errors = 0
 
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             news_params = await get_news_params(session, url, n_news)
 
             news_params = get_unprocessed_news(proccesed_urls, news_params)
             logging.info(f"Got {len(news_params)} news")
 
             to_do = [download_one_news(session, params.url, params.title, params.comment_url, folder, connections_sem) for params in news_params]
-            for future in asyncio.as_completed(to_do):
+            for task in asyncio.as_completed(to_do):
                 try:
-                    proccesed_url, proccesed_title = await future
+                    proccesed_url, proccesed_title = await task
                     proccesed += 1
                     proccesed_urls.add(proccesed_url)
                     logging.info(f"Download complete for news '{proccesed_title}' by url {proccesed_url}")
@@ -259,18 +262,19 @@ async def download_news_coro(folder, url, n_news, wait, main_url_connections):
                     errors += 1
                     logging.exception("Unexpected error: ")
 
-        logging.info(f"Downloading complete for {time()-t:.2f} seconds, {proccesed} news proccesd, {errors} errors")
-        logging.info(f"Wait {wait} seconds")
-        await asyncio.sleep(wait)
+        work_time = time()-t
+        wait_time = int(wait - work_time if work_time < wait else 0)
+        logging.info(f"Downloading complete for {work_time:.2f} seconds, {proccesed} news proccesd, {errors} errors")
+
+        logging.info(f"Wait {wait_time} seconds")
+        await asyncio.sleep(wait_time)
 
 
 def download_news(folder, url, n_news, wait, main_url_connections):
     if not os.path.exists(folder):
         os.mkdir(folder)
 
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(download_news_coro(folder, url, n_news, wait, main_url_connections))
-    loop.close()
+    asyncio.run(download_news_coro(folder, url, n_news, wait, main_url_connections))
 
 
 def main():
