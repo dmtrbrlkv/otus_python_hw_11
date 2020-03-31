@@ -1,7 +1,6 @@
 from argparse import ArgumentParser
 import asyncio
 import aiohttp
-import async_timeout
 import logging
 from collections import namedtuple
 import re
@@ -95,10 +94,10 @@ def make_fn_from_url(url):
 
 
 async def get_response(session, url, err_msg):
-        response = await session.get(url)
-        if response.status != HTTPStatus.OK:
-            raise DownloadError(url, err_msg + f", response status {response.status}")
-        return response
+    response = await session.get(url)
+    if response.status != HTTPStatus.OK:
+        raise DownloadError(url, err_msg + f", response status {response.status}")
+    return response
 
 
 async def download_to_file(session, url, folder):
@@ -133,7 +132,7 @@ async def get_urls_in_comment(session, base_url, comment_url, conections_sem):
     for comment in re.findall(comment_pattern, content):
         for url in re.findall(urls_in_comment_pattern, comment):
             url = unescape(url)
-            if not SCHEME_TEMPLATE in url:
+            if SCHEME_TEMPLATE not in url:
                 url = base_url + url
 
             urls.add(url)
@@ -158,10 +157,10 @@ async def get_news_params(session, url, n_news):
     return news_params
 
 
-def get_unprocessed_news(proccesed_urls, news_params):
+def get_unprocessed_news(processed_urls, news_params):
     unprocessed_news = []
     for params in news_params:
-        if not params.url in proccesed_urls:
+        if params.url not in processed_urls:
             unprocessed_news.append(params)
 
     return unprocessed_news
@@ -181,7 +180,7 @@ async def download_one_news(session, url, title, comment_url, folder, connection
             else:
                 logging.exception(f"Error download additional news for '{title}' by url {e.url}")
             raise
-        except Exception as e:
+        except Exception:
             if is_main:
                 logging.exception(f"Unexpected error download main news '{title}'")
             else:
@@ -226,7 +225,7 @@ async def download_one_news(session, url, title, comment_url, folder, connection
 
 
 async def download_news_coro(folder, url, n_news, wait, main_url_connections):
-    proccesed_urls = set()
+    processed_urls = set()
     connections_sem = asyncio.Semaphore(main_url_connections)
 
     i = 0
@@ -238,33 +237,33 @@ async def download_news_coro(folder, url, n_news, wait, main_url_connections):
 
         logging.info(f"Downloading begin, cycle {i}")
 
-        proccesed = 0
+        processed = 0
         errors = 0
 
         timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             news_params = await get_news_params(session, url, n_news)
 
-            news_params = get_unprocessed_news(proccesed_urls, news_params)
+            news_params = get_unprocessed_news(processed_urls, news_params)
             logging.info(f"Got {len(news_params)} news")
 
             to_do = [download_one_news(session, params.url, params.title, params.comment_url, folder, connections_sem) for params in news_params]
             for task in asyncio.as_completed(to_do):
                 try:
-                    proccesed_url, proccesed_title = await task
-                    proccesed += 1
-                    proccesed_urls.add(proccesed_url)
-                    logging.info(f"Download complete for news '{proccesed_title}' by url {proccesed_url}")
+                    processed_url, processed_title = await task
+                    processed += 1
+                    processed_urls.add(processed_url)
+                    logging.info(f"Download complete for news '{processed_title}' by url {processed_url}")
                 except DownloadError as e:
                     errors += 1
                     logging.exception(f"Error process news by url {e.url} - {e.msg}: ")
-                except Exception as e:
+                except Exception:
                     errors += 1
                     logging.exception("Unexpected error: ")
 
         work_time = time()-t
         wait_time = int(wait - work_time if work_time < wait else 0)
-        logging.info(f"Downloading complete for {work_time:.2f} seconds, {proccesed} news proccesd, {errors} errors")
+        logging.info(f"Downloading complete for {work_time:.2f} seconds, {processed} news proccesd, {errors} errors")
 
         logging.info(f"Wait {wait_time} seconds")
         await asyncio.sleep(wait_time)
@@ -295,7 +294,7 @@ def main():
         download_news(options.folder, options.url, options.news, options.wait, options.connections)
     except KeyboardInterrupt:
         logging.info("Stop")
-    except Exception as e:
+    except Exception:
         logging.exception("Unexpected error: ")
 
 
