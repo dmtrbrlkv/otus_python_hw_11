@@ -1,5 +1,15 @@
 ## Async crawler for https://news.ycombinator.com/
-Run 
+
+Download news from links from the main page https://news.ycombinator.com/, as well as from all links from comments
+
+### Requirements
+Python 3.7+
+
+aiohttp 3.3+
+
+
+### Run
+
 python async_crawler.py
 
 
