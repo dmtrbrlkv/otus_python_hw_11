@@ -157,10 +157,10 @@ async def get_news_params(session, url, n_news):
     return news_params
 
 
-def get_unprocessed_news(processed_urls, news_params):
+def get_unprocessed_news(processed_urls, processing_urls, news_params):
     unprocessed_news = []
     for params in news_params:
-        if params.url not in processed_urls:
+        if params.url not in processed_urls and params.url not in processing_urls:
             unprocessed_news.append(params)
 
     return unprocessed_news
@@ -224,56 +224,70 @@ async def download_one_news(session, url, title, comment_url, folder, connection
     return url, title
 
 
-async def download_news_coro(folder, url, n_news, wait, main_url_connections):
+async def download_news_coro(session, folder, url, n_news, processed_urls, processing_urls, connections_sem):
+    t = time()
+    processed = 0
+    errors = 0
+
+    news_params = await get_news_params(session, url, n_news)
+    news_params = get_unprocessed_news(processed_urls, processing_urls, news_params)
+    logging.info(f"Got {len(news_params)} news")
+    processing_urls.update([params.url for params in news_params])
+
+    to_do = [download_one_news(session, params.url, params.title, params.comment_url, folder, connections_sem)
+             for
+             params in news_params]
+
+    for task in asyncio.as_completed(to_do):
+        try:
+            processed_url, processed_title = await task
+            processed += 1
+            processed_urls.add(processed_url)
+            processing_urls.remove(processed_url)
+            logging.info(f"Download complete for news '{processed_title}' by url {processed_url}")
+        except DownloadError as e:
+            errors += 1
+            processing_urls.remove(e.url)
+            logging.exception(f"Error process news by url {e.url} - {e.msg}: ")
+        except Exception:
+            errors += 1
+            logging.exception("Unexpected error: ")
+
+    work_time = time() - t
+    return processed, errors, work_time
+
+
+async def crawler_coro(folder, url, n_news, wait, main_url_connections):
+    def download_news_callback(news_params_task):
+        processed, errors, work_time = news_params_task.result()
+        logging.info(f"Downloading complete for {work_time:.2f} seconds, {processed} news processed, {errors} errors")
+
     processed_urls = set()
+    processing_urls = set()
     connections_sem = asyncio.Semaphore(main_url_connections)
 
-    i = 0
-    while True:
-        t = time()
-        i += 1
-        if CYCLES and i > CYCLES:
-            break
+    timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        i = 0
+        while True:
+            i += 1
+            if CYCLES and i > CYCLES:
+                break
 
-        logging.info(f"Downloading begin, cycle {i}")
+            logging.info(f"Downloading begin, cycle {i}")
+            logging.info(f"Processed urls: {len(processed_urls)} ({processed_urls}), Processing urls: {len(processing_urls)} ({processing_urls})")
 
-        processed = 0
-        errors = 0
+            download_news_task = asyncio.create_task(download_news_coro(session, folder, url, n_news, processed_urls, processing_urls, connections_sem))
+            download_news_task.add_done_callback(download_news_callback)
 
-        timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            news_params = await get_news_params(session, url, n_news)
-
-            news_params = get_unprocessed_news(processed_urls, news_params)
-            logging.info(f"Got {len(news_params)} news")
-
-            to_do = [download_one_news(session, params.url, params.title, params.comment_url, folder, connections_sem) for params in news_params]
-            for task in asyncio.as_completed(to_do):
-                try:
-                    processed_url, processed_title = await task
-                    processed += 1
-                    processed_urls.add(processed_url)
-                    logging.info(f"Download complete for news '{processed_title}' by url {processed_url}")
-                except DownloadError as e:
-                    errors += 1
-                    logging.exception(f"Error process news by url {e.url} - {e.msg}: ")
-                except Exception:
-                    errors += 1
-                    logging.exception("Unexpected error: ")
-
-        work_time = time()-t
-        wait_time = int(wait - work_time if work_time < wait else 0)
-        logging.info(f"Downloading complete for {work_time:.2f} seconds, {processed} news proccesd, {errors} errors")
-
-        logging.info(f"Wait {wait_time} seconds")
-        await asyncio.sleep(wait_time)
+            logging.info(f"Next run after {wait} seconds")
+            await asyncio.sleep(wait)
 
 
-def download_news(folder, url, n_news, wait, main_url_connections):
+def crawler(folder, url, n_news, wait, main_url_connections):
     if not os.path.exists(folder):
         os.mkdir(folder)
-
-    asyncio.run(download_news_coro(folder, url, n_news, wait, main_url_connections))
+    asyncio.run(crawler_coro(folder, url, n_news, wait, main_url_connections))
 
 
 def main():
@@ -291,7 +305,7 @@ def main():
                         format='[%(asctime)s] %(levelname).1s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
 
     try:
-        download_news(options.folder, options.url, options.news, options.wait, options.connections)
+        crawler(options.folder, options.url, options.news, options.wait, options.connections)
     except KeyboardInterrupt:
         logging.info("Stop")
     except Exception:
